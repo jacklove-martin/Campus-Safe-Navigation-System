@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+.vscode/
+
+.env
+
+*.tif
+*.img
+*.lock
+*.tmp
