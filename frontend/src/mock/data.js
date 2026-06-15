@@ -1,7 +1,7 @@
 export const routeModes = [
   { id: 'night', label: '夜间安全', icon: 'Moon', accent: 'teal', description: '优先照明连续、开敞度更高的主通路' },
   { id: 'accessible', label: '无障碍', icon: 'Access', accent: 'gold', description: '避开台阶与陡坡，保障轮椅可达性' },
-  { id: 'evacuation', label: '应急撤离', icon: 'Alert', accent: 'coral', description: '面向突发场景，优先最近安全集结点' },
+  { id: 'evacuation', label: '应急疏散', icon: 'Alert', accent: 'coral', description: '面向突发场景，优先最近安全集结点' },
   { id: 'multi', label: '多目标导航', icon: 'Flow', accent: 'sky', description: '支持食堂、商店、宿舍串联路径规划' }
 ]
 
@@ -9,7 +9,7 @@ export const quickQuestions = [
   '晚上从教学楼回一组团四栋哪条路更安全？',
   '现在最近还开门的食堂在哪里？',
   '从图书馆去操场的无障碍路线怎么走？',
-  '如果宿舍楼发生火灾，怎么撤离到最近校门？'
+  '如果宿舍楼发生火灾，怎么疏散到最近校门？'
 ]
 
 export const mapLayers = [
@@ -64,6 +64,14 @@ export const resultSummary = {
   eta: '8 分钟',
   distance: '640 米',
   score: '安全评分 92',
+  message: '当前为前端默认展示数据，后端连接成功后会自动覆盖。',
+  dataSource: 'Mock Data',
+  originLabel: '教学楼北门',
+  midpointLabel: '图书馆广场',
+  facilityLabel: '第一食堂',
+  destinationLabel: '一组团四栋',
+  poiLabel: '东门集结点',
+  hazardLabel: '施工围挡',
   reason: [
     '优先通过主照明步道与开敞广场，降低夜间盲区风险。',
     '自动避开施工围挡、狭窄路口和照度偏低支路。',
@@ -80,7 +88,7 @@ export const resultSummary = {
 export const alerts = [
   { level: '正常', title: '夜间照明稳定', text: '主步道照明覆盖良好，当前推荐路线安全等级较高。' },
   { level: '提示', title: '西侧施工绕行', text: '施工围挡区域已被剔除，建议不要脱离推荐路线。' },
-  { level: '应急', title: '撤离模式可切换', text: '如遇突发情况，可一键切换至最近校门或操场。' }
+  { level: '应急', title: '疏散模式可切换', text: '如遇突发情况，可一键切换至最近校门或操场。' }
 ]
 
 export const scenarioCards = [

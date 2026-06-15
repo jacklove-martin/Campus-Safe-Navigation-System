@@ -566,6 +566,45 @@ input {
     linear-gradient(180deg, #dfe8d2 0%, #ecefdf 100%);
 }
 
+.live-map-shell {
+  background: #d8e6d2;
+}
+
+.leaflet-host {
+  position: absolute;
+  inset: 0;
+}
+
+.map-overlay-copy {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 500;
+  max-width: 340px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 253, 249, 0.92);
+  border: 1px solid rgba(57, 71, 45, 0.12);
+  box-shadow: 0 12px 24px rgba(63, 53, 37, 0.08);
+}
+
+.map-overlay-copy p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.map-overlay-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--sky-soft);
+  color: #4d70ba;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .terrain-shape {
   position: absolute;
   border-radius: 999px;

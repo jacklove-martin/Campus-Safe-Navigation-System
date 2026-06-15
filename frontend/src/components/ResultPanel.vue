@@ -6,6 +6,7 @@
         <span class="pill pill-sky">{{ summary.mode }}</span>
       </div>
       <h3>{{ summary.title }}</h3>
+      <p class="facility-detail">{{ summary.message }}</p>
       <div class="summary-stats">
         <div>
           <span class="metric-label">步行距离</span>

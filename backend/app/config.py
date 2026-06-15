@@ -17,6 +17,14 @@ APP_TITLE: str = "校园安全导览系统 API"
 APP_VERSION: str = "0.1.0"
 CORS_ORIGINS: list[str] = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 
-# ArcPy / GIS 配置（mdb 就绪后填写）
-MDB_PATH: str = os.getenv("MDB_PATH", "")
-NETWORK_DATASET: str = os.getenv("NETWORK_DATASET", "")
+# PostgreSQL 数据库配置
+DB_HOST: str = os.getenv("DB_HOST", "127.0.0.1")
+DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
+DB_NAME: str = os.getenv("DB_NAME", "campus_nav_db")
+DB_USER: str = os.getenv("DB_USER", "postgres")
+DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
+
+# DSN 连接串（asyncpg 使用）
+DB_DSN: str = (
+    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+)

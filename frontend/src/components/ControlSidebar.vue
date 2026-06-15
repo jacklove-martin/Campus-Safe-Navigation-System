@@ -3,10 +3,12 @@
     <section class="sidebar-block sidebar-intro">
       <div class="section-head">
         <h2>任务面板</h2>
-        <span class="pill pill-emerald">Mock Data</span>
+        <span class="pill" :class="loading ? 'pill-gold' : 'pill-emerald'">
+          {{ loading ? 'Loading' : sourceLabel }}
+        </span>
       </div>
       <p class="sidebar-note">
-        通过自然语言输入、模式切换和图层控制，模拟后续接入 LLM 与 GIS 的统一入口。
+        通过自然语言输入、模式切换和图层控制，统一接入后端 GIS 与问答服务。
       </p>
     </section>
 
@@ -26,21 +28,24 @@
           v-for="question in quickQuestions"
           :key="question"
           class="ghost-chip"
+          :disabled="loading"
           @click="$emit('select-question', question)"
         >
           {{ question }}
         </button>
       </div>
       <div class="primary-actions action-row">
-        <button class="primary-button">解析问题</button>
-        <button class="secondary-button">重置输入</button>
+        <button class="primary-button" :disabled="loading" @click="$emit('submit')">
+          {{ loading ? '请求中...' : '解析问题' }}
+        </button>
+        <button class="secondary-button" :disabled="loading" @click="$emit('reset')">重置输入</button>
       </div>
     </section>
 
     <section class="sidebar-block">
       <div class="section-head">
         <h2>场景模式</h2>
-        <span class="muted-mini">分析模型切换</span>
+        <span class="muted-mini">分析模式切换</span>
       </div>
       <div class="mode-stack">
         <button
@@ -48,6 +53,7 @@
           :key="mode.id"
           class="mode-panel"
           :class="[`accent-${mode.accent}`, { active: mode.id === activeMode }]"
+          :disabled="loading"
           @click="$emit('change-mode', mode.id)"
         >
           <div class="mode-panel-top">
@@ -70,6 +76,7 @@
             <input
               type="checkbox"
               :checked="layer.active"
+              :disabled="loading"
               @change="$emit('toggle-layer', layer.id)"
             />
             <div>
@@ -90,9 +97,15 @@
         <span class="pill pill-warm">高优先级</span>
       </div>
       <div class="emergency-actions">
-        <button class="danger-button">一键撤离到最近校门</button>
-        <button class="secondary-button">切换最近操场</button>
-        <button class="secondary-button">查看应急出口</button>
+        <button class="danger-button" :disabled="loading" @click="$emit('evacuation', 'gate')">
+          一键疏散到最近校门
+        </button>
+        <button class="secondary-button" :disabled="loading" @click="$emit('evacuation', 'playground')">
+          切换最近操场
+        </button>
+        <button class="secondary-button" :disabled="loading" @click="$emit('evacuation', 'exit')">
+          查看应急出口
+        </button>
       </div>
     </section>
   </aside>
@@ -119,8 +132,24 @@ defineProps({
   layers: {
     type: Array,
     required: true
+  },
+  loading: {
+    type: Boolean,
+    default: false
+  },
+  sourceLabel: {
+    type: String,
+    default: 'Mock Data'
   }
 })
 
-defineEmits(['update:query', 'select-question', 'change-mode', 'toggle-layer'])
+defineEmits([
+  'update:query',
+  'select-question',
+  'change-mode',
+  'toggle-layer',
+  'submit',
+  'reset',
+  'evacuation'
+])
 </script>
