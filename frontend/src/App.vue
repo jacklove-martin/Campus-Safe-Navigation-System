@@ -4,13 +4,15 @@
     <div class="ambient ambient-right"></div>
 
     <AppHeader
+      :active-view="activeView"
       :active-mode-label="activeModeLabel"
       :backend-status="backendStatus"
       :message="headerMessage"
       :loading="loading"
+      @change-view="activeView = $event"
     />
 
-    <main class="dashboard-grid refined-layout">
+    <main v-if="activeView === 'assistant'" class="assistant-layout">
       <ControlSidebar
         v-model:query="query"
         :quick-questions="quickQuestions"
@@ -19,6 +21,32 @@
         :layers="layers"
         :loading="loading"
         :source-label="dataSourceLabel"
+        @select-question="query = $event"
+        @change-mode="activeMode = $event"
+        @toggle-layer="toggleLayer"
+        @submit="handleSubmit"
+        @reset="resetToMock"
+        @evacuation="handleEmergency"
+      />
+
+      <ResultPanel
+        :summary="uiSummary"
+        :facility-cards="uiFacilityCards"
+        :query="query"
+        :loading="loading"
+      />
+    </main>
+
+    <main v-else class="dashboard-grid refined-layout">
+      <ControlSidebar
+        v-model:query="query"
+        :quick-questions="quickQuestions"
+        :modes="routeModes"
+        :active-mode="activeMode"
+        :layers="layers"
+        :loading="loading"
+        :source-label="dataSourceLabel"
+        compact
         @select-question="query = $event"
         @change-mode="activeMode = $event"
         @toggle-layer="toggleLayer"
@@ -39,8 +67,6 @@
         />
         <StatusBoard :alerts="uiAlerts" :scenarios="scenarioCards" />
       </section>
-
-      <ResultPanel :summary="uiSummary" :facility-cards="uiFacilityCards" />
     </main>
   </div>
 </template>
@@ -69,6 +95,7 @@ const defaultQuery = '晚上从教学楼北门回一组团四栋，哪条路更�
 
 const query = ref(defaultQuery)
 const activeMode = ref('night')
+const activeView = ref('assistant')
 const layers = ref(mapLayers)
 const loading = ref(false)
 const backendHealthy = ref(false)
