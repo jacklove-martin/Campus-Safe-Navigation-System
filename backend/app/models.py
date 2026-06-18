@@ -61,17 +61,17 @@ class QueryRequest(BaseModel):
 
 class RouteRequest(BaseModel):
     """路径规划通用请求体"""
-    origin: str = Field(..., description="出发地名称或设施ID")
-    destination: str = Field(..., description="目的地名称或设施ID")
+    origin: str = Field(..., min_length=1, max_length=100, description="出发地名称或设施ID")
+    destination: str = Field(..., min_length=1, max_length=100, description="目的地名称或设施ID")
     mode: RouteMode = Field(RouteMode.night, description="路径模式")
     user_location: Optional[Coordinate] = Field(None, description="用户当前坐标（可选，用于就近计算）")
 
 
 class MultiStopRouteRequest(BaseModel):
     """多目标串联路径请求体"""
-    origin: str = Field(..., description="出发地")
+    origin: str = Field(..., min_length=1, max_length=100, description="出发地")
     stops: list[str] = Field(..., min_length=1, description="中途停靠点列表，按顺序排列")
-    destination: str = Field(..., description="最终目的地")
+    destination: str = Field(..., min_length=1, max_length=100, description="最终目的地")
     time_constraint: Optional[str] = Field(None, description="时间约束，如 '22:00'")
 
 
@@ -80,6 +80,7 @@ class FacilitySearchRequest(BaseModel):
     keyword: Optional[str] = Field(None, description="关键词（名称/别名/标签）")
     facility_type: Optional[FacilityType] = Field(None, description="设施类型筛选")
     night_available: Optional[bool] = Field(None, description="是否夜间可用")
+    open_now: Optional[bool] = Field(None, description="是否当前营业中")
     is_evacuation_point: Optional[bool] = Field(None, description="是否为撤离点")
     user_location: Optional[Coordinate] = Field(None, description="用于计算最近距离")
 
@@ -113,6 +114,7 @@ class FacilityItem(BaseModel):
     alias_names: Optional[str] = None
     open_time: Optional[str] = None
     close_time: Optional[str] = None
+    is_open_now: Optional[bool] = Field(None, description="是否当前营业中")
     night_available: bool = False
     is_evacuation_point: bool = False
     remark: Optional[str] = None
@@ -140,6 +142,7 @@ class RouteResult(BaseModel):
     route_geojson: dict[str, Any] = Field(..., description="路径 GeoJSON LineString")
     steps: list[RouteStep] = Field(default_factory=list, description="路径步骤列表")
     reason: list[str] = Field(default_factory=list, description="推荐理由列表")
+    optimized_stops: list[str] = Field(default_factory=list, description="多目标路径最终采用的停靠顺序")
     is_mock: bool = Field(True, description="是否为 mock 数据，mdb 接入后置为 False")
 
 

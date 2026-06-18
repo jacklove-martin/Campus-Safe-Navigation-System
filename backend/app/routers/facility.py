@@ -12,6 +12,7 @@ from app.models import (
     FacilityType,
 )
 from app.services.facility import (
+    get_all_facility_points,
     get_evacuation_points,
     get_facility_by_id,
     search_facilities,
@@ -26,6 +27,7 @@ async def facility_search(
     keyword: str | None = QParam(None, description="关键词：名称/别名/标签均参与匹配"),
     facility_type: FacilityType | None = QParam(None, description="设施类型筛选"),
     night_available: bool | None = QParam(None, description="是否夜间可用"),
+    open_now: bool | None = QParam(None, description="是否当前营业中"),
     is_evacuation_point: bool | None = QParam(None, description="是否为撤离集结点"),
     user_lng: float | None = QParam(None, description="用户当前经度，提供后按距离排序"),
     user_lat: float | None = QParam(None, description="用户当前纬度"),
@@ -48,6 +50,7 @@ async def facility_search(
         keyword=keyword,
         facility_type=facility_type,
         night_available=night_available,
+        open_now=open_now,
         is_evacuation_point=is_evacuation_point,
         user_location=user_location,
         limit=limit,
@@ -69,6 +72,11 @@ async def evacuation_points(
     user_location = Coordinate(lng=user_lng, lat=user_lat) if user_lng and user_lat else None
     items = await get_evacuation_points(user_location)
     return FacilitySearchResponse(success=True, total=len(items), items=items)
+
+
+@router.get("/all-points", summary="获取所有设施点位")
+async def all_points():
+    return await get_all_facility_points()
 
 
 @router.get("/{facility_id}", response_model=FacilityItem, summary="按 ID 获取设施详情")

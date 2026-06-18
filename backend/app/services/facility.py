@@ -4,6 +4,7 @@
 """
 import math
 import logging
+from datetime import datetime, time
 
 from app.db import get_pool
 from app.models import Coordinate, FacilityItem, FacilityType
@@ -26,6 +27,7 @@ _CATEGORY_MAP = {
 
 # 撤离集结点类型
 _EVACUATION_CATEGORIES = {"playground", "gate"}
+_poi_names_cache: list[str] | None = None
 
 
 def _haversine(c1: Coordinate, c2: Coordinate) -> float:
@@ -36,6 +38,69 @@ def _haversine(c1: Coordinate, c2: Coordinate) -> float:
     dlng = math.radians(c2.lng - c1.lng)
     a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
     return R * 2 * math.asin(math.sqrt(a))
+
+
+async def get_all_poi_names(refresh: bool = False) -> list[str]:
+    """Return all known POI names for LLM place-name validation."""
+    global _poi_names_cache
+
+    if _poi_names_cache is not None and not refresh:
+        return _poi_names_cache
+
+    pool = get_pool()
+    sql = """
+        SELECT name
+        FROM nav.poi
+        WHERE name IS NOT NULL AND trim(name) <> ''
+        ORDER BY name
+    """
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql)
+    except Exception as exc:
+        logger.warning("POI name cache load failed: %s", exc)
+        return _poi_names_cache or []
+
+    _poi_names_cache = [row["name"] for row in rows if row["name"]]
+    return _poi_names_cache
+
+
+def _parse_time_value(value: str | time | None) -> time | None:
+    if value is None:
+        return None
+
+    if isinstance(value, time):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+
+    return None
+
+
+def is_open_now(open_time: str | time | None, close_time: str | time | None, now: time | None = None) -> bool:
+    """Judge whether current time falls in the business-hours interval."""
+    start = _parse_time_value(open_time)
+    end = _parse_time_value(close_time)
+    if start is None or end is None:
+        return False
+
+    current = now or datetime.now().time()
+    if start == end:
+        return True
+
+    if start < end:
+        return start <= current <= end
+
+    return current >= start or current <= end
 
 
 def _row_to_facility(row: dict) -> FacilityItem:
@@ -59,14 +124,17 @@ def _row_to_facility(row: dict) -> FacilityItem:
     # keywords 是 PostgreSQL text[] 数组
     keywords = row.get("keywords") or []
     keyword_tags = ",".join(keywords) if keywords else None
+    open_time = str(row["open_time"]) if row.get("open_time") else None
+    close_time = str(row["close_time"]) if row.get("close_time") else None
 
     return FacilityItem(
         facility_id=str(row["poi_id"]),
         facility_name=row.get("name") or "",
         facility_type=facility_type,
         alias_names=None,
-        open_time=str(row["open_time"]) if row.get("open_time") else None,
-        close_time=str(row["close_time"]) if row.get("close_time") else None,
+        open_time=open_time,
+        close_time=close_time,
+        is_open_now=is_open_now(open_time, close_time),
         night_available=bool(row.get("night_available", False)),
         is_evacuation_point=is_evacuation,
         remark=row.get("remark"),
@@ -80,6 +148,7 @@ async def search_facilities(
     keyword: str | None = None,
     facility_type: FacilityType | None = None,
     night_available: bool | None = None,
+    open_now: bool | None = None,
     is_evacuation_point: bool | None = None,
     user_location: Coordinate | None = None,
     limit: int = 20,
@@ -124,6 +193,7 @@ async def search_facilities(
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
+    row_limit = limit * (10 if open_now is not None else 3)
     sql = f"""
         SELECT
             poi_id, name, category, type,
@@ -132,13 +202,16 @@ async def search_facilities(
             ST_AsText(geom) AS geom
         FROM nav.poi
         {where}
-        LIMIT {limit * 3}
+        LIMIT {row_limit}
     """
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
 
     items = [_row_to_facility(dict(row)) for row in rows]
+
+    if open_now is not None:
+        items = [item for item in items if item.is_open_now is open_now]
 
     # 计算距离并排序
     if user_location:
@@ -194,3 +267,34 @@ async def get_evacuation_points(
         is_evacuation_point=True,
         user_location=user_location,
     )
+
+
+async def get_all_facility_points() -> list[dict]:
+    """Return simplified facility point data for map initialization."""
+    pool = get_pool()
+    sql = """
+        SELECT
+            poi_id, name, category,
+            ST_AsText(geom) AS geom
+        FROM nav.poi
+        WHERE geom IS NOT NULL
+        ORDER BY name
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql)
+
+    points = []
+    for row in rows:
+        item = _row_to_facility(dict(row))
+        if not item.coordinate:
+            continue
+        points.append(
+            {
+                "facility_id": item.facility_id,
+                "facility_name": item.facility_name,
+                "facility_type": item.facility_type,
+                "coordinate": item.coordinate.model_dump(),
+            }
+        )
+
+    return points

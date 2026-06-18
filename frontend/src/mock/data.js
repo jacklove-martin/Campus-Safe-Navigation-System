@@ -7,9 +7,9 @@ export const routeModes = [
 
 export const quickQuestions = [
   '晚上从教学楼回一组团四栋哪条路更安全？',
-  '现在最近还开门的食堂在哪里？',
+  '怎么从篮球场疏散到最近校门？',
   '从图书馆去操场的无障碍路线怎么走？',
-  '如果宿舍楼发生火灾，怎么疏散到最近校门？'
+  '教职工食堂到学校南门怎么走？'
 ]
 
 export const mapLayers = [

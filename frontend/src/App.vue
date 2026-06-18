@@ -131,6 +131,9 @@ const modeIntentKeywords = {
   multi: '多目标'
 }
 
+const facilityQuestionKeywords = ['在哪', '哪里', '开门', '营业', '几点', '有没有', '最近', '食堂', '便利店', '超市', '售货机']
+const routeQuestionKeywords = ['从', '到', '去', '回', '怎么走', '导航', '路线', '哪条路', '疏散', '撤离', '无障碍', '安全']
+
 const activeModeLabel = computed(() => {
   return routeModes.find((mode) => mode.id === activeMode.value)?.label ?? '夜间安全'
 })
@@ -215,7 +218,7 @@ function formatScore(score) {
 
 function mapRouteSteps(route) {
   if (!route?.steps?.length) {
-    return structuredClone(routeTimeline)
+    return []
   }
 
   return route.steps.map((step, index) => ({
@@ -291,18 +294,18 @@ function mapSummaryFromResponse(data) {
   const route = data.route
   const facilities = data.facilities ?? []
   const isMock = data.is_mock ?? route?.is_mock ?? true
-  const origin = route?.origin || data.parsed_task?.origin || '当前位置'
-  const destination = route?.destination || data.parsed_task?.destination || '目标地点'
+  const origin = route?.origin || data.parsed_task?.origin || '待补充起点'
+  const destination = route?.destination || data.parsed_task?.destination || facilities[0]?.facility_name || '目标地点'
 
   currentSummary.value = {
-    title: `${origin} → ${destination}`,
+    title: route ? `${origin} → ${destination}` : destination,
     mode: modeLabelMap[activeMode.value] || activeModeLabel.value,
     eta: formatEta(route?.eta_min),
     distance: formatDistance(route?.distance_m),
     score: formatScore(route?.safety_score),
     message: data.message || '后端已返回结果。',
     dataSource: isMock ? 'Mock Fallback' : 'Backend API',
-    originLabel: origin,
+    originLabel: route ? origin : '待补充起点',
     midpointLabel: route?.steps?.[1]?.title || '路径中段',
     facilityLabel: facilities[0]?.facility_name || '联动设施',
     destinationLabel: destination,
@@ -314,11 +317,11 @@ function mapSummaryFromResponse(data) {
       : ['本次返回未包含路径步骤，可结合设施结果继续细化提问。']
   }
 
-  currentTimeline.value = mapRouteSteps(route)
+  currentTimeline.value = route ? mapRouteSteps(route) : []
   currentFacilityCards.value = mapFacilities(facilities)
   currentStats.value = buildStats(route, facilities, isMock)
   currentAlerts.value = mapAlerts(data.message, route, facilities, isMock)
-  currentRouteGeojson.value = route?.route_geojson ?? null
+  currentRouteGeojson.value = route?.route_geojson?.geometry?.coordinates?.length ? route.route_geojson : null
   currentFacilities.value = facilities
   usingMockFallback.value = isMock
   lastMessage.value = data.message || '后端已返回结果。'
@@ -382,6 +385,12 @@ function normalizePromptByMode(text, mode) {
 
   const hint = modeIntentKeywords[mode]
   if (trimmed.includes(hint)) {
+    return trimmed
+  }
+
+  const looksLikeFacilityQuestion = facilityQuestionKeywords.some((keyword) => trimmed.includes(keyword))
+  const looksLikeRouteQuestion = routeQuestionKeywords.some((keyword) => trimmed.includes(keyword))
+  if (looksLikeFacilityQuestion && !looksLikeRouteQuestion) {
     return trimmed
   }
 

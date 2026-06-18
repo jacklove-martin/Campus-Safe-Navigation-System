@@ -8,21 +8,86 @@ GIS 服务层：基于 networkx 的路径规划。
   无障碍：  cost = length_m + (10 - barrier_free_score) * 40  （台阶路段权重极大）
   应急撤离：cost = length_m + (10 - emergency_evacuation_score) * 25
 """
-import copy
 import logging
 import math
+import re
+import time
+from itertools import permutations
 from typing import Any
 
 import networkx as nx
 
 from app.db import get_pool
-from app.mock_data import MOCK_ROUTES
-from app.models import Coordinate, FacilityItem, RouteMode, RouteResult, RouteStep
+from app.models import Coordinate, RouteMode, RouteResult, RouteStep
 
 logger = logging.getLogger(__name__)
 
 # 路网图缓存（进程内，首次请求时加载）
 _graph_cache: dict[str, nx.DiGraph] = {}
+_ROUTE_CACHE_TTL_SECONDS = 300
+_ROUTE_CACHE_MAX_SIZE = 200
+_route_cache: dict[tuple, tuple[float, RouteResult]] = {}
+
+
+def _user_location_cache_key(user_location: Coordinate | None) -> tuple[float, float] | None:
+    if not user_location:
+        return None
+    return (round(user_location.lng, 7), round(user_location.lat, 7))
+
+
+def _route_cache_key(
+    mode: RouteMode,
+    origin: str,
+    destination: str,
+    user_location: Coordinate | None,
+) -> tuple:
+    return (mode.value, origin, destination, _user_location_cache_key(user_location))
+
+
+def _get_cached_route(key: tuple) -> RouteResult | None:
+    cached = _route_cache.get(key)
+    if not cached:
+        return None
+
+    expires_at, result = cached
+    if expires_at <= time.monotonic():
+        _route_cache.pop(key, None)
+        return None
+
+    return result.model_copy(deep=True)
+
+
+def _set_cached_route(key: tuple, result: RouteResult) -> None:
+    if len(_route_cache) >= _ROUTE_CACHE_MAX_SIZE:
+        _route_cache.pop(next(iter(_route_cache)))
+
+    _route_cache[key] = (
+        time.monotonic() + _ROUTE_CACHE_TTL_SECONDS,
+        result.model_copy(deep=True),
+    )
+
+
+async def reload_graph_cache() -> dict[str, dict[str, int]]:
+    """Clear route graph cache and eagerly reload supported routing modes."""
+    _graph_cache.clear()
+    _route_cache.clear()
+    loaded: dict[str, dict[str, int]] = {}
+
+    for mode in (RouteMode.night, RouteMode.accessible, RouteMode.evacuation):
+        graph = await _load_graph(mode)
+        loaded[mode.value] = {
+            "nodes": graph.number_of_nodes(),
+            "edges": graph.number_of_edges(),
+        }
+
+    return loaded
+
+
+def graph_cache_status() -> dict[str, bool]:
+    return {
+        mode.value: mode.value in _graph_cache
+        for mode in (RouteMode.night, RouteMode.accessible, RouteMode.evacuation)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +130,7 @@ async def _load_graph(mode: RouteMode) -> nx.DiGraph:
         barrier_free = float(r["barrier_free_score"] or 5)
         flatness = float(r["flatness_score"] or 5)
         evacuation = float(r["emergency_evacuation_score"] or 5)
+        width = float(r["width_score"] or 5)
 
         # 根据模式计算边权重
         if mode == RouteMode.night:
@@ -85,6 +151,11 @@ async def _load_graph(mode: RouteMode) -> nx.DiGraph:
             "length_m": length,
             "road_id": r["road_id"],
             "geom": r.get("geom"),
+            "lighting_score": lighting,
+            "barrier_free_score": barrier_free,
+            "flatness_score": flatness,
+            "emergency_evacuation_score": evacuation,
+            "width_score": width,
         }
         # 双向路段
         G.add_edge(src, tgt, **edge_data)
@@ -133,9 +204,20 @@ def _nearest_node(
 
 
 def _find_poi_coord(name: str, pois: list[dict]) -> Coordinate | None:
-    """按名称模糊匹配 POI 坐标。"""
+    """按名称匹配 POI 坐标，优先精确匹配，避免“南门”误命中“图书馆南门”。"""
+    target = (name or "").strip()
+    if not target:
+        return None
+
     for poi in pois:
-        if name in (poi.get("name") or ""):
+        if (poi.get("name") or "").strip() == target:
+            geom = poi.get("geom", "")
+            if geom and geom.startswith("POINT"):
+                parts = geom.replace("POINT(", "").replace(")", "").split()
+                return Coordinate(lng=float(parts[0]), lat=float(parts[1]))
+
+    for poi in pois:
+        if target in (poi.get("name") or ""):
             geom = poi.get("geom", "")
             if geom and geom.startswith("POINT"):
                 parts = geom.replace("POINT(", "").replace(")", "").split()
@@ -152,13 +234,121 @@ async def _load_pois() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _path_to_geojson(path_nodes: list[int], nodes: dict[int, Coordinate]) -> dict[str, Any]:
+def _parse_wkt_line_coords(geom: str | None) -> list[list[float]]:
+    """从 PostGIS WKT 中提取 LineString 坐标，忽略 Z/M 维度。"""
+    if not geom:
+        return []
+
+    wkt = geom.strip()
+    if not wkt:
+        return []
+
+    if wkt.upper().startswith("SRID=") and ";" in wkt:
+        wkt = wkt.split(";", 1)[1].strip()
+
+    def parse_line_body(body: str) -> list[list[float]]:
+        coords = []
+        for pair in body.split(","):
+            parts = pair.strip().split()
+            if len(parts) < 2:
+                continue
+            try:
+                coords.append([float(parts[0]), float(parts[1])])
+            except ValueError:
+                continue
+        return coords
+
+    upper = wkt.upper()
+    if upper.startswith("LINESTRING"):
+        body = wkt[wkt.find("(") + 1:wkt.rfind(")")]
+        return parse_line_body(body)
+
+    if upper.startswith("MULTILINESTRING"):
+        inner = wkt[wkt.find("(") + 1:wkt.rfind(")")]
+        coords: list[list[float]] = []
+        for line_body in re.findall(r"\(([^()]+)\)", inner):
+            _append_line_coords(coords, parse_line_body(line_body))
+        return coords
+
+    return []
+
+
+def _coord_distance(point: list[float], coord: Coordinate) -> float:
+    return math.hypot(point[0] - coord.lng, point[1] - coord.lat)
+
+
+def _same_coord(a: list[float], b: list[float], tolerance: float = 1e-9) -> bool:
+    return abs(a[0] - b[0]) <= tolerance and abs(a[1] - b[1]) <= tolerance
+
+
+def _append_line_coords(target: list[list[float]], coords: list[list[float]]) -> None:
+    if not coords:
+        return
+
+    if target and _same_coord(target[-1], coords[0]):
+        target.extend(coords[1:])
+        return
+
+    target.extend(coords)
+
+
+def _orient_edge_coords(
+    coords: list[list[float]],
+    source_coord: Coordinate,
+    target_coord: Coordinate,
+) -> list[list[float]]:
+    """按当前行进方向排列路段折线。"""
+    if len(coords) < 2:
+        return coords
+
+    forward_cost = _coord_distance(coords[0], source_coord) + _coord_distance(coords[-1], target_coord)
+    backward_cost = _coord_distance(coords[-1], source_coord) + _coord_distance(coords[0], target_coord)
+
+    if backward_cost < forward_cost:
+        return list(reversed(coords))
+
+    return coords
+
+
+def _edge_geometry_coords(
+    G: nx.DiGraph,
+    nodes: dict[int, Coordinate],
+    source_node: int,
+    target_node: int,
+) -> list[list[float]]:
+    """优先使用 road_segment.geom，缺失时才退回节点直连。"""
+    source_coord = nodes.get(source_node)
+    target_coord = nodes.get(target_node)
+    data = G.get_edge_data(source_node, target_node) or {}
+
+    coords = _parse_wkt_line_coords(data.get("geom"))
+    if coords and source_coord and target_coord:
+        return _orient_edge_coords(coords, source_coord, target_coord)
+
+    if source_coord and target_coord:
+        return [[source_coord.lng, source_coord.lat], [target_coord.lng, target_coord.lat]]
+
+    return []
+
+
+def _path_coordinates(path_nodes: list[int], nodes: dict[int, Coordinate], G: nx.DiGraph) -> list[list[float]]:
+    """将路径节点序列拼接为贴合路段几何的坐标序列。"""
+    coords: list[list[float]] = []
+
+    for i in range(len(path_nodes) - 1):
+        segment_coords = _edge_geometry_coords(G, nodes, path_nodes[i], path_nodes[i + 1])
+        _append_line_coords(coords, segment_coords)
+
+    if not coords and len(path_nodes) == 1 and path_nodes[0] in nodes:
+        c = nodes[path_nodes[0]]
+        coords.append([c.lng, c.lat])
+
+    return coords
+
+
+def _path_to_geojson(path_nodes: list[int], nodes: dict[int, Coordinate], G: nx.DiGraph) -> dict[str, Any]:
     """将节点 ID 序列转换为 GeoJSON LineString。"""
-    coords = []
-    for nid in path_nodes:
-        if nid in nodes:
-            c = nodes[nid]
-            coords.append([c.lng, c.lat])
+    coords = _path_coordinates(path_nodes, nodes, G)
     return {
         "type": "Feature",
         "geometry": {"type": "LineString", "coordinates": coords},
@@ -175,6 +365,54 @@ def _path_length(path_nodes: list[int], G: nx.DiGraph) -> float:
     return round(total, 1)
 
 
+def _score_fields_for_mode(mode: RouteMode) -> tuple[str, ...]:
+    if mode == RouteMode.accessible:
+        return ("barrier_free_score", "flatness_score")
+    if mode == RouteMode.evacuation:
+        return ("emergency_evacuation_score", "width_score")
+    return ("lighting_score", "width_score")
+
+
+def _normalize_score_to_100(value: float) -> float:
+    if value <= 1.5:
+        score = value * 100
+    elif value <= 10:
+        score = value * 10
+    else:
+        score = value
+
+    return max(0.0, min(100.0, score))
+
+
+def _edge_score(data: dict[str, Any], mode: RouteMode) -> float:
+    values: list[float] = []
+    for field in _score_fields_for_mode(mode):
+        try:
+            values.append(_normalize_score_to_100(float(data.get(field, 5) or 5)))
+        except (TypeError, ValueError):
+            values.append(50.0)
+
+    return sum(values) / len(values)
+
+
+def _path_score(path_nodes: list[int], G: nx.DiGraph, mode: RouteMode) -> float | None:
+    weighted_score = 0.0
+    total_length = 0.0
+
+    for i in range(len(path_nodes) - 1):
+        data = G.get_edge_data(path_nodes[i], path_nodes[i + 1]) or {}
+        length = float(data.get("length_m", 0) or 0)
+        if length <= 0:
+            continue
+        weighted_score += _edge_score(data, mode) * length
+        total_length += length
+
+    if total_length <= 0:
+        return None
+
+    return round(weighted_score / total_length, 1)
+
+
 # ---------------------------------------------------------------------------
 # 路径规划核心
 # ---------------------------------------------------------------------------
@@ -188,6 +426,11 @@ async def _calc_route(
     steps_template: list[RouteStep],
 ) -> RouteResult:
     """通用路径规划入口。"""
+    cache_key = _route_cache_key(mode, origin, destination, user_location)
+    cached = _get_cached_route(cache_key)
+    if cached:
+        return cached
+
     try:
         G = await _load_graph(mode)
         nodes = await _load_nodes()
@@ -216,27 +459,27 @@ async def _calc_route(
         length_m = _path_length(path, G)
         eta_min = round(length_m / 80, 1)  # 步行速度约 80 m/min
 
-        geojson = _path_to_geojson(path, nodes)
+        geojson = _path_to_geojson(path, nodes, G)
+        safety_score = _path_score(path, G, mode)
 
-        return RouteResult(
+        result = RouteResult(
             mode=mode,
             origin=origin,
             destination=destination,
             distance_m=length_m,
             eta_min=eta_min,
-            safety_score=None,
+            safety_score=safety_score,
             route_geojson=geojson,
             steps=steps_template,
             reason=reason,
             is_mock=False,
         )
+        _set_cached_route(cache_key, result)
+        return result
 
     except Exception as e:
-        logger.error(f"路径规划失败 [{mode.value}] {origin}->{destination}：{e}，降级到 mock")
-        result = copy.deepcopy(MOCK_ROUTES[mode])
-        result.origin = origin
-        result.destination = destination
-        return result
+        logger.error(f"路径规划失败 [{mode.value}] {origin}->{destination}：{e}")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -318,8 +561,45 @@ async def calc_multistop_route(
         pois = await _load_pois()
 
         # 构建完整路径点序列：origin -> stops -> destination
+        if 1 < len(stops) <= 4:
+            best_order: tuple[str, ...] | None = None
+            best_length: float | None = None
+            last_error: Exception | None = None
+
+            for order in permutations(stops):
+                try:
+                    candidate_waypoints = [origin] + list(order) + [destination]
+                    candidate_length = 0.0
+
+                    for i in range(len(candidate_waypoints) - 1):
+                        src_coord = _find_poi_coord(candidate_waypoints[i], pois)
+                        tgt_coord = _find_poi_coord(candidate_waypoints[i + 1], pois)
+
+                        if not src_coord or not tgt_coord:
+                            raise ValueError(
+                                f"Unable to resolve coordinates: {candidate_waypoints[i]} or {candidate_waypoints[i + 1]}"
+                            )
+
+                        src_node = _nearest_node(nodes, src_coord)
+                        tgt_node = _nearest_node(nodes, tgt_coord)
+                        path = nx.dijkstra_path(G, src_node, tgt_node, weight="weight")
+                        candidate_length += _path_length(path, G)
+
+                    if best_length is None or candidate_length < best_length:
+                        best_order = order
+                        best_length = candidate_length
+                except Exception as exc:
+                    last_error = exc
+
+            if best_order is not None:
+                stops = list(best_order)
+            elif last_error:
+                raise last_error
+
         waypoints = [origin] + stops + [destination]
         total_length = 0.0
+        weighted_score = 0.0
+        score_length = 0.0
         all_coords: list[list[float]] = []
 
         for i in range(len(waypoints) - 1):
@@ -338,13 +618,15 @@ async def calc_multistop_route(
             path = nx.dijkstra_path(G, src_node, tgt_node, weight="weight")
             seg_length = _path_length(path, G)
             total_length += seg_length
+            seg_score = _path_score(path, G, RouteMode.night)
+            if seg_score is not None and seg_length > 0:
+                weighted_score += seg_score * seg_length
+                score_length += seg_length
 
-            for nid in path:
-                if nid in nodes:
-                    c = nodes[nid]
-                    all_coords.append([c.lng, c.lat])
+            _append_line_coords(all_coords, _path_coordinates(path, nodes, G))
 
         eta_min = round(total_length / 80, 1)
+        safety_score = round(weighted_score / score_length, 1) if score_length > 0 else None
 
         # 构建步骤
         steps = [RouteStep(seq=1, title=f"从{origin}出发", detail="前往第一个目的地。", state="start")]
@@ -358,7 +640,7 @@ async def calc_multistop_route(
             destination=destination,
             distance_m=round(total_length, 1),
             eta_min=eta_min,
-            safety_score=None,
+            safety_score=safety_score,
             route_geojson={
                 "type": "Feature",
                 "geometry": {"type": "LineString", "coordinates": all_coords},
@@ -369,12 +651,10 @@ async def calc_multistop_route(
                 f"串联路径总长 {total_length:.0f} 米，为满足所有停靠条件的最优组合。",
                 "各停靠点均满足营业时间约束。",
             ],
+            optimized_stops=stops,
             is_mock=False,
         )
 
     except Exception as e:
-        logger.error(f"多目标路径规划失败：{e}，降级到 mock")
-        result = copy.deepcopy(MOCK_ROUTES[RouteMode.multi])
-        result.origin = origin
-        result.destination = destination
-        return result
+        logger.error(f"多目标路径规划失败：{e}")
+        raise
