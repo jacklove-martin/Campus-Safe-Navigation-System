@@ -20,6 +20,7 @@
         >
           3D 沉浸
         </button>
+        <button class="mini-button" @click="focusOnCampus">聚焦校区</button>
         <button class="mini-button" @click="focusOnRoute">聚焦路线</button>
       </div>
     </div>
@@ -49,6 +50,7 @@
         <div class="map-legend-card">
           <span class="legend-title">图层图例</span>
           <div class="legend-list">
+            <span class="legend-chip legend-building">建筑 3D</span>
             <span class="legend-chip legend-route">推荐路线</span>
             <span class="legend-chip legend-road">道路网</span>
             <span class="legend-chip legend-hazard">风险点</span>
@@ -60,6 +62,9 @@
       <div class="map-overlay-copy">
         <div class="map-overlay-badge">OpenStreetMap + MapLibre</div>
         <p>{{ overlayMessage }}</p>
+        <p v-if="!hasCampusBuildings" class="map-warning-copy">
+          当前没有加载到外部建筑面数据，已回退为根据你项目现有经纬度推导的建筑 3D。
+        </p>
       </div>
 
       <div class="route-summary-card editorial-card">
@@ -86,8 +91,11 @@
           class="timeline-item"
           :class="`state-${item.state}`"
         >
-          <span class="timeline-time">{{ item.time }}</span>
-          <div class="timeline-body">
+          <div class="timeline-node">
+            <span class="timeline-dot"></span>
+            <span class="timeline-time">{{ item.time }}</span>
+          </div>
+          <div class="timeline-body compact">
             <strong>{{ item.title }}</strong>
             <p>{{ item.detail }}</p>
           </div>
@@ -129,11 +137,16 @@ const props = defineProps({
   mapLayers: {
     type: Object,
     default: () => ({
+      buildings: null,
       roads: null,
       hazards: null,
       assembly: null,
       facilities: null
     })
+  },
+  focusRouteToken: {
+    type: Number,
+    default: 0
   }
 })
 
@@ -142,6 +155,7 @@ const viewMode = ref('2d')
 const defaultCenter = [114.613, 30.458]
 
 const roadLayerIds = ['roads-casing', 'roads-line', 'roads-lighting']
+const buildingLayerIds = ['campus-buildings-shadow', 'campus-buildings-fill', 'campus-buildings-extrusion']
 const hazardLayerIds = ['hazards-pulse', 'hazards-points']
 const assemblyLayerIds = ['assembly-pulse', 'assembly-points']
 const facilityLayerIds = ['facilities-points']
@@ -150,6 +164,7 @@ const routeLayerIds = ['route-glow', 'route-core']
 let mapInstance = null
 let mapLoaded = false
 let hasFitInitialData = false
+let hasAutoFocusedCampus3d = false
 
 const activeLayers = computed(() =>
   props.layers.reduce((acc, layer) => {
@@ -160,11 +175,22 @@ const activeLayers = computed(() =>
 
 const overlayMessage = computed(() => {
   if (viewMode.value === '3d') {
-    return '三维视角会倾斜镜头并抬升建筑，让道路网、风险点和疏散点更容易分层辨认。'
+    return '三维视角会优先加载当前校园范围内的建筑体块，并抬升建筑高度，让道路网、风险点和疏散点更容易分层辨认。'
   }
 
-  return '二维视角适合总览全局，图层会保持清晰配色，便于查看路线、路网和风险分布。'
+  return '二维视角适合总览全局，建筑会保持柔和底面显示，便于查看路线、道路网和风险分布。'
 })
+
+const hasCampusBuildings = computed(() => Boolean(props.mapLayers.buildings?.features?.length))
+const activeBuildingGeojson = computed(() => props.mapLayers.buildings ?? toFeatureCollection([]))
+
+function hasRenderableGeometry(geojson) {
+  if (!geojson) {
+    return false
+  }
+
+  return Boolean(getBoundsFromGeojson(geojson))
+}
 
 function buildMapStyle() {
   return {
@@ -332,15 +358,102 @@ function fitToBestBounds() {
   }
 }
 
+function fitToCampusBounds(options = {}) {
+  if (!mapInstance || !mapLoaded) {
+    return false
+  }
+
+  const campusBounds = getBoundsFromGeojson(activeBuildingGeojson.value)
+  if (!campusBounds) {
+    return false
+  }
+
+  mapInstance.fitBounds(campusBounds, {
+    padding: 72,
+    duration: options.duration ?? 900,
+    pitch: options.pitch ?? (viewMode.value === '3d' ? 60 : 0),
+    bearing: options.bearing ?? (viewMode.value === '3d' ? -28 : 0),
+    maxZoom: options.maxZoom ?? 17.6
+  })
+
+  return true
+}
+
+function isMapFarFromCampus() {
+  if (!mapInstance || !mapLoaded) {
+    return false
+  }
+
+  const campusBounds = getBoundsFromGeojson(activeBuildingGeojson.value)
+  if (!campusBounds) {
+    return false
+  }
+
+  const mapCenter = mapInstance.getCenter()
+  const campusCenter = campusBounds.getCenter()
+  const lngDiff = Math.abs(mapCenter.lng - campusCenter.lng)
+  const latDiff = Math.abs(mapCenter.lat - campusCenter.lat)
+
+  return lngDiff > 0.02 || latDiff > 0.02
+}
+
 function ensureMapLayers() {
   const emptyCollection = toFeatureCollection([])
   const facilitiesGeojson = normalizeFacilities()
 
   ensureSource('campus-roads', props.mapLayers.roads ?? emptyCollection)
+  ensureSource('campus-buildings', activeBuildingGeojson.value ?? emptyCollection)
   ensureSource('campus-hazards', props.mapLayers.hazards ?? emptyCollection)
   ensureSource('campus-assembly', props.mapLayers.assembly ?? emptyCollection)
   ensureSource('campus-facilities', facilitiesGeojson ?? emptyCollection)
   ensureSource('campus-route', props.routeGeojson ?? emptyCollection)
+
+  ensureLayer({
+    id: 'campus-buildings-shadow',
+    type: 'fill',
+    source: 'campus-buildings',
+    paint: {
+      'fill-color': '#7f6445',
+      'fill-opacity': 0.18
+    }
+  })
+
+  ensureLayer({
+    id: 'campus-buildings-fill',
+    type: 'fill',
+    source: 'campus-buildings',
+    paint: {
+      'fill-color': '#ead8b8',
+      'fill-outline-color': '#8c6c47',
+      'fill-opacity': 0.92
+    }
+  })
+
+  ensureLayer({
+    id: 'campus-buildings-extrusion',
+    type: 'fill-extrusion',
+    source: 'campus-buildings',
+    paint: {
+      'fill-extrusion-color': [
+        'interpolate',
+        ['linear'],
+        ['coalesce', ['to-number', ['get', 'height']], 18],
+        12,
+        '#f0ddb8',
+        30,
+        '#d3b084',
+        60,
+        '#9f7650'
+      ],
+      'fill-extrusion-height': [
+        '*',
+        ['coalesce', ['to-number', ['get', 'height']], 18],
+        1.45
+      ],
+      'fill-extrusion-base': 0,
+      'fill-extrusion-opacity': 0.98
+    }
+  })
 
   ensureLayer({
     id: 'roads-casing',
@@ -581,11 +694,12 @@ function ensureMapLayers() {
 }
 
 function updateLayerVisibility() {
+  setLayerVisibility(buildingLayerIds, activeLayers.value.buildings)
   setLayerVisibility(roadLayerIds, activeLayers.value.roads)
   setLayerVisibility(hazardLayerIds, activeLayers.value.hazards)
   setLayerVisibility(assemblyLayerIds, activeLayers.value.assembly)
   setLayerVisibility(facilityLayerIds, activeLayers.value.facilities)
-  setLayerVisibility(routeLayerIds, Boolean(props.routeGeojson?.geometry?.coordinates?.length))
+  setLayerVisibility(routeLayerIds, hasRenderableGeometry(props.routeGeojson))
 }
 
 function buildExtrusionsFromRoads() {
@@ -667,6 +781,30 @@ function applyViewMode(mode) {
     mapInstance.setLayoutProperty('road-extrusions', 'visibility', is3d ? 'visible' : 'none')
   }
 
+  if (mapInstance.getLayer('campus-buildings-extrusion')) {
+    mapInstance.setLayoutProperty(
+      'campus-buildings-extrusion',
+      'visibility',
+      is3d && activeLayers.value.buildings ? 'visible' : 'none'
+    )
+  }
+
+  if (mapInstance.getLayer('campus-buildings-fill')) {
+    mapInstance.setLayoutProperty(
+      'campus-buildings-fill',
+      'visibility',
+      activeLayers.value.buildings ? 'visible' : 'none'
+    )
+  }
+
+  if (mapInstance.getLayer('campus-buildings-shadow')) {
+    mapInstance.setLayoutProperty(
+      'campus-buildings-shadow',
+      'visibility',
+      activeLayers.value.buildings ? 'visible' : 'none'
+    )
+  }
+
   mapRoot.value?.classList.toggle('mode-3d', is3d)
 }
 
@@ -688,6 +826,10 @@ function setViewMode(mode) {
 
 function focusOnRoute() {
   fitToBestBounds()
+}
+
+function focusOnCampus() {
+  fitToCampusBounds()
 }
 
 onMounted(() => {
@@ -719,7 +861,22 @@ watch(
 
 watch(viewMode, (mode) => {
   applyViewMode(mode)
+
+  if (mode === '3d' && activeLayers.value.buildings && !hasAutoFocusedCampus3d && isMapFarFromCampus()) {
+    if (fitToCampusBounds()) {
+      hasAutoFocusedCampus3d = true
+    }
+  }
 })
+
+watch(
+  () => props.focusRouteToken,
+  (token, previousToken) => {
+    if (token && token !== previousToken) {
+      fitToBestBounds()
+    }
+  }
+)
 
 onBeforeUnmount(() => {
   if (mapInstance) {

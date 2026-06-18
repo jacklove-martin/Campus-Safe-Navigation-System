@@ -13,27 +13,19 @@
     />
 
     <main v-if="activeView === 'assistant'" class="assistant-layout">
-      <ControlSidebar
-        v-model:query="query"
-        :quick-questions="quickQuestions"
+      <ResultPanel
+        :messages="chatMessages"
+        :loading="loading"
+        :query="query"
         :modes="routeModes"
         :active-mode="activeMode"
-        :layers="layers"
-        :loading="loading"
-        :source-label="dataSourceLabel"
-        @select-question="query = $event"
-        @change-mode="activeMode = $event"
-        @toggle-layer="toggleLayer"
+        :quick-questions="quickQuestions"
+        @update:query="query = $event"
         @submit="handleSubmit"
-        @reset="resetToMock"
-        @evacuation="handleEmergency"
-      />
-
-      <ResultPanel
-        :summary="uiSummary"
-        :facility-cards="uiFacilityCards"
-        :query="query"
-        :loading="loading"
+        @clear-history="clearConversation"
+        @view-route="openRouteOnMap"
+        @change-mode="activeMode = $event"
+        @select-question="query = $event"
       />
     </main>
 
@@ -64,6 +56,7 @@
           :route-geojson="currentRouteGeojson"
           :facilities="currentFacilities"
           :map-layers="mapLayerData"
+          :focus-route-token="focusRouteToken"
         />
         <StatusBoard :alerts="uiAlerts" :scenarios="scenarioCards" />
       </section>
@@ -89,11 +82,11 @@ import {
   routeTimeline,
   scenarioCards
 } from './mock/data'
-import { fetchHealth, fetchMapLayer, submitSmartQuery } from './services/api'
+import { fetchCampusBuildings, fetchHealth, fetchMapLayer, submitSmartQuery } from './services/api'
 
 const defaultQuery = '晚上从教学楼北门回一组团四栋，哪条路更安全？'
 
-const query = ref(defaultQuery)
+const query = ref('')
 const activeMode = ref('night')
 const activeView = ref('assistant')
 const layers = ref(mapLayers)
@@ -110,7 +103,10 @@ const currentFacilityCards = ref(structuredClone(facilityCards))
 const currentAlerts = ref(structuredClone(alerts))
 const currentRouteGeojson = ref(null)
 const currentFacilities = ref([])
+const chatMessages = ref([])
+const focusRouteToken = ref(0)
 const mapLayerData = ref({
+  buildings: null,
   roads: null,
   hazards: null,
   assembly: null,
@@ -184,6 +180,16 @@ function cloneDefaults() {
   currentAlerts.value = structuredClone(alerts)
   currentRouteGeojson.value = null
   currentFacilities.value = []
+  chatMessages.value = []
+}
+
+function clearConversation() {
+  chatMessages.value = []
+}
+
+function openRouteOnMap() {
+  activeView.value = 'dashboard'
+  focusRouteToken.value += 1
 }
 
 function toggleLayer(id) {
@@ -218,7 +224,7 @@ function formatScore(score) {
 
 function mapRouteSteps(route) {
   if (!route?.steps?.length) {
-    return []
+    return structuredClone(routeTimeline)
   }
 
   return route.steps.map((step, index) => ({
@@ -294,18 +300,18 @@ function mapSummaryFromResponse(data) {
   const route = data.route
   const facilities = data.facilities ?? []
   const isMock = data.is_mock ?? route?.is_mock ?? true
-  const origin = route?.origin || data.parsed_task?.origin || '待补充起点'
-  const destination = route?.destination || data.parsed_task?.destination || facilities[0]?.facility_name || '目标地点'
+  const origin = route?.origin || data.parsed_task?.origin || '当前位置'
+  const destination = route?.destination || data.parsed_task?.destination || '目标地点'
 
   currentSummary.value = {
-    title: route ? `${origin} → ${destination}` : destination,
+    title: `${origin} → ${destination}`,
     mode: modeLabelMap[activeMode.value] || activeModeLabel.value,
     eta: formatEta(route?.eta_min),
     distance: formatDistance(route?.distance_m),
     score: formatScore(route?.safety_score),
     message: data.message || '后端已返回结果。',
     dataSource: isMock ? 'Mock Fallback' : 'Backend API',
-    originLabel: route ? origin : '待补充起点',
+    originLabel: origin,
     midpointLabel: route?.steps?.[1]?.title || '路径中段',
     facilityLabel: facilities[0]?.facility_name || '联动设施',
     destinationLabel: destination,
@@ -317,18 +323,41 @@ function mapSummaryFromResponse(data) {
       : ['本次返回未包含路径步骤，可结合设施结果继续细化提问。']
   }
 
-  currentTimeline.value = route ? mapRouteSteps(route) : []
+  currentTimeline.value = mapRouteSteps(route)
   currentFacilityCards.value = mapFacilities(facilities)
   currentStats.value = buildStats(route, facilities, isMock)
   currentAlerts.value = mapAlerts(data.message, route, facilities, isMock)
-  currentRouteGeojson.value = route?.route_geojson?.geometry?.coordinates?.length ? route.route_geojson : null
+  currentRouteGeojson.value = route?.route_geojson ?? null
   currentFacilities.value = facilities
   usingMockFallback.value = isMock
   lastMessage.value = data.message || '后端已返回结果。'
 }
 
+function createConversationTurn(userText, summary) {
+  const routeGeojson = currentRouteGeojson.value
+  const hasRoute = routeGeojson?.type === 'FeatureCollection'
+    ? routeGeojson.features?.some((feature) => Boolean(feature?.geometry?.coordinates?.length))
+    : Boolean(routeGeojson?.geometry?.coordinates?.length)
+
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    userText,
+    assistant: {
+      title: summary.title,
+      mode: summary.mode,
+      message: summary.message,
+      distance: summary.distance,
+      eta: summary.eta,
+      score: summary.score,
+      reason: [...(summary.reason ?? [])],
+      steps: [...(summary.steps ?? [])],
+      hasRoute
+    }
+  }
+}
+
 function resetToMock() {
-  query.value = defaultQuery
+  query.value = ''
   cloneDefaults()
   usingMockFallback.value = true
   lastMessage.value = backendHealthy.value
@@ -358,7 +387,22 @@ async function refreshMapLayers() {
       fetchMapLayer('facilities')
     ])
 
+    const layerBounds = deriveMapBounds({
+      roads,
+      hazards,
+      assembly,
+      facilities
+    })
+
+    const buildings = await fetchCampusBuildings(layerBounds, {
+      roads,
+      hazards,
+      assembly,
+      facilities
+    })
+
     mapLayerData.value = {
+      buildings,
       roads,
       hazards,
       assembly,
@@ -373,6 +417,46 @@ async function refreshMapLayers() {
       },
       ...currentAlerts.value
     ]
+  }
+}
+
+function deriveMapBounds(layers) {
+  const points = []
+
+  function collectCoordinates(coordinates) {
+    if (!Array.isArray(coordinates)) {
+      return
+    }
+
+    if (typeof coordinates[0] === 'number' && typeof coordinates[1] === 'number') {
+      points.push(coordinates)
+      return
+    }
+
+    coordinates.forEach(collectCoordinates)
+  }
+
+  Object.values(layers).forEach((layer) => {
+    if (layer?.type === 'FeatureCollection') {
+      layer.features.forEach((feature) => collectCoordinates(feature.geometry?.coordinates))
+    } else if (layer?.type === 'Feature') {
+      collectCoordinates(layer.geometry?.coordinates)
+    }
+  })
+
+  if (!points.length) {
+    return null
+  }
+
+  const lngs = points.map((item) => item[0])
+  const lats = points.map((item) => item[1])
+  const padding = 0.0015
+
+  return {
+    west: Math.min(...lngs) - padding,
+    east: Math.max(...lngs) + padding,
+    south: Math.min(...lats) - padding,
+    north: Math.max(...lats) + padding
   }
 }
 
@@ -397,17 +481,22 @@ function normalizePromptByMode(text, mode) {
   return `${hint}：${trimmed}`
 }
 
-async function handleSubmit() {
+async function handleSubmit(submittedQuery = query.value) {
   loading.value = true
+  const nextQuery = typeof submittedQuery === 'string' ? submittedQuery : query.value
+  query.value = nextQuery
+  const originalQuery = nextQuery.trim() || defaultQuery
+  const normalizedText = normalizePromptByMode(originalQuery, activeMode.value)
 
   try {
     const payload = {
-      text: normalizePromptByMode(query.value, activeMode.value)
+      text: normalizedText
     }
 
     const data = await submitSmartQuery(payload)
     await refreshHealth()
     mapSummaryFromResponse(data)
+    chatMessages.value = [...chatMessages.value, createConversationTurn(originalQuery, currentSummary.value)]
   } catch (error) {
     usingMockFallback.value = true
     lastMessage.value = error instanceof Error ? error.message : '请求失败，已保留默认演示数据。'
@@ -418,6 +507,19 @@ async function handleSubmit() {
         text: lastMessage.value
       },
       ...structuredClone(alerts).slice(0, 2)
+    ]
+    chatMessages.value = [
+      ...chatMessages.value,
+      createConversationTurn(originalQuery, {
+        title: '请求失败',
+        mode: activeModeLabel.value,
+        message: lastMessage.value,
+        distance: '暂无',
+        eta: '暂无',
+        score: '待重试',
+        reason: ['本次请求未成功完成，请检查后端连接或稍后重试。'],
+        steps: ['你可以重新发送问题，或换一种更明确的表达。']
+      })
     ]
   } finally {
     loading.value = false
@@ -439,6 +541,7 @@ function handleEmergency(target) {
 }
 
 onMounted(async () => {
+  cloneDefaults()
   await refreshHealth()
   await refreshMapLayers()
 })

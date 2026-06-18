@@ -13,6 +13,7 @@ export const quickQuestions = [
 ]
 
 export const mapLayers = [
+  { id: 'buildings', label: '建筑 3D', hint: '未来城校区建筑立体图层', active: true },
   { id: 'roads', label: '道路网络', hint: '步行主路与支路', active: true },
   { id: 'lights', label: '夜间照明', hint: '路灯覆盖与弱照区', active: true },
   { id: 'facilities', label: '服务设施', hint: '食堂、图书馆、宿舍、校门', active: true },

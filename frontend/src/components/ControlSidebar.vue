@@ -1,5 +1,5 @@
 <template>
-  <aside class="panel sidebar" :class="{ compact }">
+  <aside class="panel sidebar" :class="{ compact, 'input-only-sidebar': inputOnly }">
     <section class="sidebar-block">
       <div class="section-head">
         <h2>输入</h2>
@@ -32,11 +32,11 @@
       </div>
     </section>
 
-    <section class="sidebar-block">
+    <section v-if="!inputOnly" class="sidebar-block">
       <div class="section-head">
         <h2>模式</h2>
       </div>
-      <div class="mode-stack">
+      <div class="mode-stack compact-mode-stack">
         <button
           v-for="mode in modes"
           :key="mode.id"
@@ -53,11 +53,11 @@
       </div>
     </section>
 
-    <section class="sidebar-block">
+    <section v-if="!inputOnly" class="sidebar-block">
       <div class="section-head">
         <h2>地图图层</h2>
       </div>
-      <div class="layer-list">
+      <div class="layer-list compact-layer-list">
         <label
           v-for="layer in layers"
           :key="layer.id"
@@ -82,7 +82,7 @@
       </div>
     </section>
 
-    <section v-if="!compact" class="sidebar-block emergency-box">
+    <section v-if="!compact && !inputOnly" class="sidebar-block emergency-box">
       <div class="section-head">
         <h2>应急</h2>
       </div>
@@ -110,7 +110,8 @@ defineProps({
   layers: { type: Array, required: true },
   loading: { type: Boolean, default: false },
   sourceLabel: { type: String, default: 'Mock Data' },
-  compact: { type: Boolean, default: false }
+  compact: { type: Boolean, default: false },
+  inputOnly: { type: Boolean, default: false }
 })
 
 defineEmits(['update:query', 'select-question', 'change-mode', 'toggle-layer', 'submit', 'reset', 'evacuation'])
